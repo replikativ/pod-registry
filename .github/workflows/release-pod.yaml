@@ -8,11 +8,13 @@ jobs:
   pod_release:
     runs-on: ubuntu-slim
     steps:
+
       - name: check out babashka pod-registry
         uses: actions/checkout@v6
         with:
           repository: 'babashka/pod-registry'
           ref: 'master'
+
       - name: Check if new release
         id: release
         run: |
@@ -39,10 +41,12 @@ jobs:
           else
             echo "release=false" >> $GITHUB_OUTPUT
           fi
+
       - name: stop pipeline when no new release
         if: steps.release.outputs.release != 'true'
         run: |
           echo "Pipeline does not need to run because there is no new release"
+
       - name: check out datahike
         if: steps.release.outputs.release == 'true'
         uses: actions/checkout@v6
@@ -50,11 +54,18 @@ jobs:
           repository: 'replikativ/datahike'
           ref: 'main'
           path: datahike
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
       - name: install clojure tools
         if: steps.release.outputs.release == 'true'
         uses: DeLaGuardo/setup-clojure@13.4
         with:
           bb: 1.12.214
+
       - name: run release script
         if: steps.release.outputs.release == 'true'
         run: |
