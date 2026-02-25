@@ -1,6 +1,9 @@
 name: pod release
 run-name: Deploy datahike pod to pod-registry
 on:
+  push:
+    branches:
+      - master
   schedule:
     - cron: 00 06 * * *
 
@@ -14,9 +17,11 @@ jobs:
         with:
           repository: 'babashka/pod-registry'
           ref: 'master'
+          path: pod-registry
 
       - name: Check if new release
         id: release
+        working-directory: ./pod-registry
         run: |
           #!/usr/bin/env bash
 
@@ -47,6 +52,17 @@ jobs:
         run: |
           echo "Pipeline does not need to run because there is no new release"
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: install babashka
+        if: steps.release.outputs.release == 'true'
+        uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: 1.12.214
+
       - name: check out datahike
         if: steps.release.outputs.release == 'true'
         uses: actions/checkout@v6
@@ -54,20 +70,75 @@ jobs:
           repository: 'replikativ/datahike'
           ref: 'main'
           path: datahike
+          fetch-depth: 0
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '25'
-
-      - name: install clojure tools
+      - name: get release version
+        id: version
         if: steps.release.outputs.release == 'true'
-        uses: DeLaGuardo/setup-clojure@13.4
-        with:
-          bb: 1.12.214
-
-      - name: run release script
-        if: steps.release.outputs.release == 'true'
+        working-directory: ./datahike
         run: |
-          cd datahike
-          bb release pod
+          echo "version=$(bb -e '
+            (require (quote [babashka.deps :as deps]))
+            (deps/add-deps
+             (quote {:deps {io.github.babashka/tools.bbuild
+                            {:git/url "https://github.com/babashka/tools.bbuild"
+                             :git/sha "4493ba83664bdbfcaf932845fbd2f2183cdb7c1d"}}}))
+            (require (quote [clojure.tools.build.api :as b])
+                     (quote [clojure.edn :as edn]))
+            (let [{:keys [major minor]} (-> "config.edn" slurp edn/read-string :version)
+                  commit-nr (b/git-count-revs {:dir "."})]
+              (print (str major "." minor "." commit-nr)))
+          ')" >> $GITHUB_OUTPUT
+
+      - name: update pod-registry files
+        if: steps.release.outputs.release == 'true'
+        working-directory: ./pod-registry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bb {0}
+        run: |
+          (require '[babashka.fs :as fs]
+                   '[clojure.string :as s])
+          (import '[java.nio.file FileAlreadyExistsException])
+          (let [version (System/getenv "VERSION")]
+            (println "Changing manifest for version " version)
+            (let [manifest (slurp "manifests/replikativ/datahike/0.6.1607/manifest.edn")]
+              (try (fs/create-dir (str "manifests/replikativ/datahike/" version))
+                (catch FileAlreadyExistsException _
+                  (do
+                    (println "It seems there is already a release with that number")
+                    (System/exit 1))))
+              (->> (s/replace manifest #"0\.6\.1607" version)
+                   (spit (str "manifests/replikativ/datahike/" version "/manifest.edn")))
+              (->> (s/replace (slurp "README.md")
+                              #"(?m)^\| \[replikativ/datahike\].*$"
+                              (str "| [replikativ/datahike](https://github.com/replikativ/datahike) | A fast, immutable, distributed & compositional Datalog engine for everyone. | " version " | [link](https://raw.githubusercontent.com/babashka/pod-registry/master/examples/datahike.clj) | [<img src=\"https://upload.wikimedia.org/wikipedia/commons/5/5d/Clojure_logo.svg\" alt=\"clojure\" width=\"24\" height=\"24\">](https://clojure.org/) |"))
+                   (spit "README.md"))
+              (->> (s/replace (slurp "examples/datahike.clj")
+                              #"(?m)^\(pods/load-pod .*$"
+                              (str "(pods/load-pod 'replikativ/datahike \"" version "\")"))
+                   (spit "examples/datahike.clj"))))
+
+      - name: commit and push to fork
+        if: steps.release.outputs.release == 'true'
+        working-directory: ./pod-registry
+        run: |
+          git config user.email "contact@datahike.io"
+          git config user.name "Datahike CI"
+          git remote set-url origin "https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/replikativ/pod-registry.git"
+          git checkout -b "datahike-${{ steps.version.outputs.version }}"
+          git add .
+          git commit -m "Update Datahike pod to ${{ steps.version.outputs.version }}"
+          git push origin "datahike-${{ steps.version.outputs.version }}"
+
+      - name: create PR on babashka/pod-registry
+        if: steps.release.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh pr create \
+            --repo babashka/pod-registry \
+            --head "replikativ:datahike-${{ steps.version.outputs.version }}" \
+            --base master \
+            --title "Update Datahike pod to ${{ steps.version.outputs.version }}" \
+            --body "Automated update of Datahike pod"
