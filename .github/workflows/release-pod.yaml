@@ -18,6 +18,7 @@ jobs:
           repository: 'babashka/pod-registry'
           ref: 'master'
           path: pod-registry
+          fetch-depth: 0
 
       - name: Check if new release
         id: release
@@ -42,7 +43,13 @@ jobs:
           )"
 
           if [[ "$(printf '%s\n' "$latest_published" "$latest_released" | sort -V | head -n1)" != "$latest_released" ]]; then
-            echo "release=true" >> $GITHUB_OUTPUT
+            # Check if a branch for this version already exists on the fork
+            if git ls-remote --heads "https://github.com/replikativ/pod-registry.git" "datahike-${latest_released}" | grep -q .; then
+              echo "Branch datahike-${latest_released} already exists on fork, skipping"
+              echo "release=false" >> $GITHUB_OUTPUT
+            else
+              echo "release=true" >> $GITHUB_OUTPUT
+            fi
           else
             echo "release=false" >> $GITHUB_OUTPUT
           fi
